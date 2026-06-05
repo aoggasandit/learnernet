@@ -2,9 +2,13 @@ import base64
 import datetime
 import hashlib
 import io
+import json
 import os
+import re
 import secrets
 import sqlite3
+import urllib.parse
+import urllib.request
 from pathlib import Path
 import smtplib
 from email.message import EmailMessage
@@ -12,6 +16,67 @@ from email.message import EmailMessage
 from dotenv import load_dotenv
 import openai
 import streamlit as st
+
+SAFE_KEYWORDS = [
+    "kill",
+    "die",
+    "attack",
+    "threat",
+    "bully",
+    "stupid",
+    "idiot",
+    "hate",
+    "shut up",
+    "bastard",
+    "abuse",
+    "violence",
+    "threaten",
+    "terror",
+    "harass",
+    "rape",
+    "destroy",
+    "bomb",
+]
+
+ROLE_PERMISSIONS = {
+    "Super Admin": [
+        "view_all_data",
+        "manage_users",
+        "change_settings",
+        "reset_passwords",
+        "view_safety_events",
+        "view_all_scans",
+        "download_reports",
+        "manage_school",
+    ],
+    "School Management": [
+        "view_all_students",
+        "view_geofence_events",
+        "view_late_pickups",
+        "download_reports",
+        "view_safety_events",
+    ],
+    "Staff/Security": [
+        "scan_qr",
+        "mark_pickup",
+        "view_today_scans",
+    ],
+    "Parent": [
+        "view_own_child",
+        "view_child_location",
+        "receive_alerts",
+    ],
+    "Student": [
+        "view_own_status",
+        "consent_tracking",
+    ],
+}
+
+SAFE_PERIMETER_DEFAULT = {
+    "center_lat": 0.0,
+    "center_lng": 0.0,
+    "radius_meters": 300.0,
+}
 
 load_dotenv()
 
@@ -46,6 +111,18 @@ def verify_password(password, stored_hash, stored_salt):
     return secrets.compare_digest(candidate_hash, stored_hash)
 
 
+def analyze_text_safety(text):
+    normalized = text.lower()
+    for keyword in SAFE_KEYWORDS:
+        if keyword in normalized:
+            return {
+                "flagged": True,
+                "reason": f"Contains flagged keyword '{keyword}'.",
+                "severity": "high",
+            }
+    return {"flagged": False, "reason": None, "severity": "low"}
+
+
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
@@ -57,6 +134,10 @@ def init_db():
             password_hash TEXT,
             salt TEXT,
             email TEXT,
+            phone TEXT,
+            role TEXT NOT NULL DEFAULT 'Parent',
+            active INTEGER DEFAULT 1,
+            user_code TEXT,
             created_at TEXT NOT NULL
         )
         """
@@ -141,17 +222,6 @@ def init_db():
         )
         """
     )
-
-    cursor.execute("PRAGMA table_info(users)")
-    existing_columns = [row[1] for row in cursor.fetchall()]
-    if "password_hash" not in existing_columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
-    if "salt" not in existing_columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN salt TEXT")
-    if "email" not in existing_columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
-
-    # Table to store password reset tokens
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS password_resets (
@@ -165,8 +235,6 @@ def init_db():
         )
         """
     )
-
-    # Table to store user profiles
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS profiles (
@@ -186,6 +254,87 @@ def init_db():
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS parent_child_relations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_user_id INTEGER NOT NULL,
+            student_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(parent_user_id, student_user_id),
+            FOREIGN KEY (parent_user_id) REFERENCES users(id),
+            FOREIGN KEY (student_user_id) REFERENCES users(id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS qr_scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scanner_id INTEGER,
+            student_user_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            location TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (scanner_id) REFERENCES users(id),
+            FOREIGN KEY (student_user_id) REFERENCES users(id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS geofence_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_user_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (student_user_id) REFERENCES users(id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS safety_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            category TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+    cursor.execute("PRAGMA table_info(users)")
+    existing_columns = [row[1] for row in cursor.fetchall()]
+    if "password_hash" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+    if "salt" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN salt TEXT")
+    if "email" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    if "phone" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+    if "role" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Parent'")
+    if "active" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1")
+    if "user_code" not in existing_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN user_code TEXT")
 
     conn.commit()
     conn.close()
@@ -284,10 +433,28 @@ def add_comment(post_id, user_id, body):
 def fetch_user_by_id(user_id):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, username, created_at FROM users WHERE id = ?", (user_id,))
+    cursor.execute(
+        "SELECT id, username, created_at, password_hash, salt, email, phone, role, active, user_code FROM users WHERE id = ?",
+        (user_id,),
+    )
     row = cursor.fetchone()
     conn.close()
-    return dict(id=row[0], username=row[1], created_at=row[2]) if row else None
+    return (
+        dict(
+            id=row[0],
+            username=row[1],
+            created_at=row[2],
+            password_hash=row[3],
+            salt=row[4],
+            email=row[5],
+            phone=row[6],
+            role=row[7],
+            active=row[8],
+            user_code=row[9],
+        )
+        if row
+        else None
+    )
 
 
 def fetch_user(username):
@@ -295,13 +462,24 @@ def fetch_user(username):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, username, created_at, password_hash, salt, email FROM users WHERE username = ?",
+        "SELECT id, username, created_at, password_hash, salt, email, phone, role, active, user_code FROM users WHERE username = ?",
         (username,),
     )
     row = cursor.fetchone()
     conn.close()
     return (
-        dict(id=row[0], username=row[1], created_at=row[2], password_hash=row[3], salt=row[4], email=row[5])
+        dict(
+            id=row[0],
+            username=row[1],
+            created_at=row[2],
+            password_hash=row[3],
+            salt=row[4],
+            email=row[5],
+            phone=row[6],
+            role=row[7],
+            active=row[8],
+            user_code=row[9],
+        )
         if row
         else None
     )
@@ -311,13 +489,24 @@ def fetch_user_by_email(email):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, username, created_at, password_hash, salt, email FROM users WHERE email = ?",
+        "SELECT id, username, created_at, password_hash, salt, email, phone, role, active, user_code FROM users WHERE email = ?",
         (email,),
     )
     row = cursor.fetchone()
     conn.close()
     return (
-        dict(id=row[0], username=row[1], created_at=row[2], password_hash=row[3], salt=row[4], email=row[5])
+        dict(
+            id=row[0],
+            username=row[1],
+            created_at=row[2],
+            password_hash=row[3],
+            salt=row[4],
+            email=row[5],
+            phone=row[6],
+            role=row[7],
+            active=row[8],
+            user_code=row[9],
+        )
         if row
         else None
     )
@@ -453,23 +642,66 @@ def reset_password(token, new_password):
     return True
 
 
-def create_user(username, password):
-    return create_user_with_email(username, password, None)
+def create_user(username, password, email=None, phone=None, role="Parent", active=1):
+    return create_user_with_email(username, password, email=email, phone=phone, role=role, active=active)
 
 
-def create_user_with_email(username, password, email=None):
-    # prevent duplicate username or email
+def generate_unique_user_code():
+    while True:
+        code = secrets.token_urlsafe(12)
+        if not fetch_user_by_code(code):
+            return code
+
+
+def fetch_user_by_code(user_code):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, username, created_at, password_hash, salt, email, phone, role, active, user_code FROM users WHERE user_code = ?",
+        (user_code,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return (
+        dict(
+            id=row[0],
+            username=row[1],
+            created_at=row[2],
+            password_hash=row[3],
+            salt=row[4],
+            email=row[5],
+            phone=row[6],
+            role=row[7],
+            active=row[8],
+            user_code=row[9],
+        )
+        if row
+        else None
+    )
+
+
+def create_user_with_email(username, password, email=None, phone=None, role="Parent", active=1):
     if fetch_user(username) is not None:
         return None
     if email and fetch_user_by_email(email) is not None:
         return None
+    if phone:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE phone = ?", (phone,))
+        if cursor.fetchone():
+            conn.close()
+            return None
+        conn.close()
+
     salt, password_hash = hash_password(password)
+    user_code = generate_unique_user_code()
     created_at = datetime.datetime.utcnow().isoformat()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO users (username, password_hash, salt, email, created_at) VALUES (?, ?, ?, ?, ?)",
-        (username, password_hash, salt, email, created_at),
+        "INSERT INTO users (username, password_hash, salt, email, phone, role, active, user_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (username, password_hash, salt, email, phone, role, active, user_code, created_at),
     )
     conn.commit()
     user = fetch_user(username)
@@ -483,9 +715,328 @@ def authenticate_user(username_or_email, password):
         user = fetch_user_by_email(username_or_email)
     if not user:
         return None
+    if not user.get("active"):
+        return None
     if verify_password(password, user.get("password_hash"), user.get("salt")):
         return user
     return None
+
+
+def get_setting(key, default=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return default
+    return row[0]
+
+
+def set_setting(key, value):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, json.dumps(value) if isinstance(value, (dict, list)) else str(value)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_safe_zone():
+    raw = get_setting("safe_zone")
+    if raw is None:
+        return SAFE_PERIMETER_DEFAULT.copy()
+    try:
+        zone = json.loads(raw)
+        return {
+            "center_lat": float(zone.get("center_lat", SAFE_PERIMETER_DEFAULT["center_lat"])),
+            "center_lng": float(zone.get("center_lng", SAFE_PERIMETER_DEFAULT["center_lng"])),
+            "radius_meters": float(zone.get("radius_meters", SAFE_PERIMETER_DEFAULT["radius_meters"])),
+        }
+    except Exception:
+        return SAFE_PERIMETER_DEFAULT.copy()
+
+
+def update_safe_zone(center_lat, center_lng, radius_meters):
+    set_setting(
+        "safe_zone",
+        {
+            "center_lat": float(center_lat),
+            "center_lng": float(center_lng),
+            "radius_meters": float(radius_meters),
+        },
+    )
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    from math import asin, cos, radians, sin, sqrt
+
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    return 6371000 * c
+
+
+def is_inside_safe_zone(latitude, longitude):
+    zone = get_safe_zone()
+    distance = haversine_distance(latitude, longitude, zone["center_lat"], zone["center_lng"])
+    return distance <= float(zone["radius_meters"])
+
+
+def get_parents_for_student(student_user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT p.id, p.username, p.email, p.phone FROM users p JOIN parent_child_relations r ON p.id = r.parent_user_id WHERE r.student_user_id = ?",
+        (student_user_id,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {"id": row[0], "username": row[1], "email": row[2], "phone": row[3]} for row in rows
+    ]
+
+
+def get_students_for_parent(parent_user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT s.id, s.username, s.email, s.phone FROM users s JOIN parent_child_relations r ON s.id = r.student_user_id WHERE r.parent_user_id = ?",
+        (parent_user_id,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {"id": row[0], "username": row[1], "email": row[2], "phone": row[3]} for row in rows
+    ]
+
+
+def create_parent_child_relation(parent_user_id, student_user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    created_at = datetime.datetime.utcnow().isoformat()
+    cursor.execute(
+        "INSERT OR IGNORE INTO parent_child_relations (parent_user_id, student_user_id, created_at) VALUES (?, ?, ?)",
+        (parent_user_id, student_user_id, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_scan_event(scanner_id, student_user_id, event_type, latitude=None, longitude=None, location=None, notes=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    created_at = datetime.datetime.utcnow().isoformat()
+    cursor.execute(
+        "INSERT INTO qr_scans (scanner_id, student_user_id, event_type, latitude, longitude, location, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (scanner_id, student_user_id, event_type, latitude, longitude, location, notes, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_geofence_event(student_user_id, event_type, latitude=None, longitude=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    created_at = datetime.datetime.utcnow().isoformat()
+    cursor.execute(
+        "INSERT INTO geofence_events (student_user_id, event_type, latitude, longitude, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (student_user_id, event_type, latitude, longitude, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_safety_event(user_id, content, category="content", severity="medium"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    created_at = datetime.datetime.utcnow().isoformat()
+    cursor.execute(
+        "INSERT INTO safety_events (user_id, content, category, severity, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, content, category, severity, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_scan_events():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT s.id, s.student_user_id, u.username, s.scanner_id, scanner.username, s.event_type, s.location, s.latitude, s.longitude, s.notes, s.created_at FROM qr_scans s LEFT JOIN users u ON u.id = s.student_user_id LEFT JOIN users scanner ON scanner.id = s.scanner_id ORDER BY s.created_at DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "student_user_id": row[1],
+            "student_username": row[2],
+            "scanner_id": row[3],
+            "scanner_username": row[4],
+            "event_type": row[5],
+            "location": row[6],
+            "latitude": row[7],
+            "longitude": row[8],
+            "notes": row[9],
+            "created_at": row[10],
+        }
+        for row in rows
+    ]
+
+
+def get_today_scan_events():
+    today = datetime.datetime.utcnow().date().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, student_user_id, event_type, location, latitude, longitude, notes, created_at FROM qr_scans WHERE created_at >= ? ORDER BY created_at DESC",
+        (today + "T00:00:00",),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "student_user_id": row[1],
+            "event_type": row[2],
+            "location": row[3],
+            "latitude": row[4],
+            "longitude": row[5],
+            "notes": row[6],
+            "created_at": row[7],
+        }
+        for row in rows
+    ]
+
+
+def get_geofence_events():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT g.id, g.student_user_id, u.username, g.event_type, g.latitude, g.longitude, g.created_at FROM geofence_events g LEFT JOIN users u ON u.id = g.student_user_id ORDER BY g.created_at DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "student_user_id": row[1],
+            "student_username": row[2],
+            "event_type": row[3],
+            "latitude": row[4],
+            "longitude": row[5],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]
+
+
+def get_late_pickups():
+    cutoff = get_setting("pickup_cutoff", "15:00")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, student_user_id, event_type, location, latitude, longitude, notes, created_at FROM qr_scans WHERE event_type = 'Pickup' AND created_at >= ? ORDER BY created_at DESC",
+        (datetime.datetime.utcnow().date().isoformat() + "T" + cutoff + ":00",),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "student_user_id": row[1],
+            "event_type": row[2],
+            "location": row[3],
+            "latitude": row[4],
+            "longitude": row[5],
+            "notes": row[6],
+            "created_at": row[7],
+        }
+        for row in rows
+    ]
+
+
+def get_safety_events():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT s.id, s.user_id, u.username, s.content, s.category, s.severity, s.created_at FROM safety_events s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "user_id": row[1],
+            "username": row[2],
+            "content": row[3],
+            "category": row[4],
+            "severity": row[5],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]
+
+
+def get_emergency_recipients():
+    raw = os.getenv("EMERGENCY_SMS_RECIPIENTS", "")
+    return [phone.strip() for phone in raw.split(",") if phone.strip()]
+
+
+def send_sms(to_number, message):
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_number = os.getenv("TWILIO_PHONE_NUMBER")
+    if not account_sid or not auth_token or not from_number:
+        raise RuntimeError("Twilio credentials are not configured for SMS alerts.")
+    data = urllib.parse.urlencode({"To": to_number, "From": from_number, "Body": message}).encode("utf-8")
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    req = urllib.request.Request(url, data=data)
+    auth_header = base64.b64encode(f"{account_sid}:{auth_token}".encode("utf-8")).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth_header}")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    with urllib.request.urlopen(req) as response:
+        return response.read().decode("utf-8")
+
+
+def notify_parents_of_event(student_user_id, event_type, latitude=None, longitude=None, location=None):
+    student = fetch_user_by_id(student_user_id)
+    parents = get_parents_for_student(student_user_id)
+    if not parents:
+        return []
+    zone = get_safe_zone()
+    google_maps_url = f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}" if latitude and longitude else ""
+    message = (
+        f"Alert: {student['username']} {event_type} outside safe perimeter. "
+        f"Location: {location or 'unknown'}. "
+        f"Map: {google_maps_url}"
+    )
+    results = []
+    for parent in parents:
+        if parent.get("phone"):
+            try:
+                send_sms(parent["phone"], message)
+                results.append({"parent": parent["username"], "status": "sent"})
+            except Exception as exc:
+                results.append({"parent": parent["username"], "status": f"failed: {exc}"})
+    for emergency_phone in get_emergency_recipients():
+        try:
+            send_sms(emergency_phone, message)
+            results.append({"parent": emergency_phone, "status": "sent"})
+        except Exception as exc:
+            results.append({"parent": emergency_phone, "status": f"failed: {exc}"})
+    return results
+
+
+def user_has_permission(user, permission):
+    if not user:
+        return False
+    return permission in ROLE_PERMISSIONS.get(user.get("role", ""), [])
 
 
 # Profile management functions
@@ -569,6 +1120,9 @@ def update_cover_picture(user_id, filepath):
 
 
 def add_post(user_id, title, body):
+    safety = analyze_text_safety(f"{title}\n{body}")
+    if safety["flagged"]:
+        record_safety_event(user_id, f"Post flagged: {title}\n{body}", "post", safety["severity"])
     conn = get_connection()
     cursor = conn.cursor()
     created_at = datetime.datetime.utcnow().isoformat()
@@ -581,6 +1135,9 @@ def add_post(user_id, title, body):
 
 
 def add_comment(post_id, user_id, body):
+    safety = analyze_text_safety(body)
+    if safety["flagged"]:
+        record_safety_event(user_id, body, "comment", safety["severity"])
     conn = get_connection()
     cursor = conn.cursor()
     created_at = datetime.datetime.utcnow().isoformat()
@@ -814,6 +1371,9 @@ def get_user_likes_given(user_id):
 
 def send_message(sender_id, receiver_id, body):
     """Send a private message from sender to receiver."""
+    safety = analyze_text_safety(body)
+    if safety["flagged"]:
+        record_safety_event(sender_id, body, "message", safety["severity"])
     conn = get_connection()
     cursor = conn.cursor()
     created_at = datetime.datetime.utcnow().isoformat()
@@ -984,23 +1544,48 @@ def format_ai_document(source_text, instruction, style="Summary"):
 
 
 def ensure_sample_data():
-    if get_posts() or get_resources():
+    user_count = len(get_all_users_except_current(0))
+    if user_count > 0:
         return
+
+    super_admin_username = os.getenv("SUPER_ADMIN_USERNAME", "admin")
+    super_admin_password = os.getenv("SUPER_ADMIN_PASSWORD", "Admin1234!")
+    super_admin_email = os.getenv("SUPER_ADMIN_EMAIL", "admin@redemptiongate.local")
+    super_admin_phone = os.getenv("SUPER_ADMIN_PHONE", "")
+    super_admin = fetch_user(super_admin_username)
+    if super_admin is None:
+        super_admin = create_user_with_email(
+            super_admin_username,
+            super_admin_password,
+            email=super_admin_email,
+            phone=super_admin_phone or None,
+            role="Super Admin",
+            active=1,
+        )
 
     staff = fetch_user("StudyBuddy")
     if staff is None:
-        staff = create_user("StudyBuddy", "learning123")
+        staff = create_user_with_email(
+            "StudyBuddy",
+            "learning123",
+            email="security@redemptiongate.local",
+            phone=None,
+            role="Staff/Security",
+            active=1,
+        )
+
     add_post(
-        staff["id"],
-        "Welcome to LearnerNet",
-        "Share research notes, ask questions, and use the AI assistant to explore topics faster.",
+        super_admin["id"],
+        "Welcome to Redemption Gate",
+        "The app is now secured with role-based access, geofence alerts, and QR scan tracking.",
     )
     add_resource(
-        staff["id"],
-        "Research Skills Guide",
-        "https://www.coursera.org/learn/research-methods",
-        "A beginner-friendly introduction to research techniques and academic learning.",
+        super_admin["id"],
+        "Safety and Security Guide",
+        "https://example.com/safety-guide",
+        "This portal is designed for school management, staff, parents, and students only.",
     )
+    update_safe_zone(0.0, 0.0, 300.0)
 
 
 def display_feed(current_user_id):
@@ -1092,7 +1677,7 @@ def main():
             st.session_state.auth_message = "You have signed out."
             st.rerun()
     else:
-        st.sidebar.info("Use the Auth page to sign in or register.")
+        st.sidebar.info("Use the Account page to sign in. Accounts are created by administrators only.")
 
     page = st.sidebar.radio(
         "Navigate",
@@ -1104,8 +1689,9 @@ def main():
             "AI Media Studio",
             "Direct Messages",
             "My Profile",
-            "Register/Login",
+            "Security",
             "Admin",
+            "Account",
         ],
     )
 
@@ -1386,114 +1972,257 @@ def main():
                     st.write(comment["body"])
                     st.caption(comment["created_at"][:10])
 
-    elif page == "Admin":
-        st.title("Admin — Users")
-        admin_env = os.getenv("ADMIN_USERNAMES", "admin,StudyBuddy")
-        admin_usernames = [u.strip() for u in admin_env.split(",") if u.strip()]
-        is_admin = (
-            st.session_state.user_id
-            and (
-                st.session_state.username in admin_usernames
-                or st.session_state.email in admin_usernames
-            )
-        )
-        if not is_admin:
-            st.error("Admin access required. Sign in as an admin user.")
+    elif page == "Security":
+        st.title("Security & Safe Zone Monitoring")
+        if not st.session_state.user_id:
+            st.warning("Please sign in to access the security dashboard.")
         else:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, username, email, created_at, password_hash, salt FROM users ORDER BY created_at"
-            )
-            rows = cursor.fetchall()
-            show_hashes = st.checkbox("Show password hashes and salts (sensitive)")
-            show_tokens = st.checkbox("Show password reset tokens (sensitive)")
-            import csv
-            from io import StringIO
+            current_user = fetch_user_by_id(st.session_state.user_id)
+            st.write(f"Signed in as **{current_user['username']}** · {current_user['role']}")
+            if current_user["role"] in ["Staff/Security", "School Management", "Super Admin"]:
+                st.subheader("Scan student QR and log events")
+                student_candidates = [u for u in get_all_users_except_current(0) if fetch_user_by_id(u["id"])["role"] == "Student"]
+                student_choice = st.selectbox(
+                    "Select student",
+                    [s["username"] for s in student_candidates],
+                    key="security_student_choice",
+                )
+                event_type = st.selectbox("Event type", ["Entry", "Exit", "Pickup"], key="security_event_type")
+                location = st.text_input("Location description", key="security_location")
+                latitude = st.number_input("Latitude", value=0.0, format="%.6f", key="security_lat")
+                longitude = st.number_input("Longitude", value=0.0, format="%.6f", key="security_lng")
+                notes = st.text_area("Notes", key="security_notes")
+                if st.button("Record scan event"):
+                    student_user = fetch_user(student_choice)
+                    if student_user:
+                        record_scan_event(
+                            current_user["id"],
+                            student_user["id"],
+                            event_type,
+                            latitude,
+                            longitude,
+                            location,
+                            notes,
+                        )
+                        if not is_inside_safe_zone(latitude, longitude):
+                            record_geofence_event(student_user["id"], "Exited safe perimeter", latitude, longitude)
+                            notify_parents_of_event(student_user["id"], event_type, latitude, longitude, location)
+                        st.success("Scan event recorded and logged.")
 
-            table = []
-            for r in rows:
-                entry = {"id": r[0], "username": r[1], "email": r[2], "created_at": r[3]}
-                if show_hashes:
-                    entry["password_hash"] = r[4]
-                    entry["salt"] = r[5]
-                table.append(entry)
+                if student_choice:
+                    student_user = fetch_user(student_choice)
+                    qr_payload = f"student:{student_user['user_code']}"
+                    qr_url = f"https://chart.googleapis.com/chart?cht=qr&chs=250x250&chl={urllib.parse.quote(qr_payload)}"
+                    st.markdown("#### Student QR code")
+                    st.image(qr_url, caption="Scan this QR code at the gate", use_column_width=False)
+                    st.code(qr_payload)
 
-            st.dataframe(table)
+                st.markdown("---")
+                st.subheader("Today's scan history")
+                today_scans = get_today_scan_events()
+                if not today_scans:
+                    st.info("No scans recorded today.")
+                else:
+                    st.dataframe(today_scans)
 
-            # provide CSV export
-            csv_buf = StringIO()
-            writer = csv.DictWriter(csv_buf, fieldnames=table[0].keys() if table else ["id", "username"])
-            if table:
-                writer.writeheader()
-                writer.writerows(table)
-            st.download_button("Download users CSV", csv_buf.getvalue(), file_name="users.csv", mime="text/csv")
+            elif current_user["role"] == "Parent":
+                st.subheader("Your children")
+                children = get_students_for_parent(current_user["id"])
+                if not children:
+                    st.info("No linked children found. Contact an administrator to connect your account.")
+                else:
+                    for child in children:
+                        st.markdown(f"### {child['username']}")
+                        recent_scans = [scan for scan in get_all_scan_events() if scan["student_user_id"] == child["id"]]
+                        if not recent_scans:
+                            st.info("No scans available for this student yet.")
+                        else:
+                            st.dataframe(recent_scans[:5])
 
-            if show_tokens:
-                try:
-                    cursor.execute(
-                        "SELECT pr.id, pr.user_id, u.username, pr.token, pr.expires_at, pr.used, pr.created_at FROM password_resets pr JOIN users u ON u.id = pr.user_id ORDER BY pr.created_at DESC"
+            elif current_user["role"] == "Student":
+                st.subheader("Your status")
+                st.write("Your account is connected to the school safety network.")
+                st.write("If you scan in or out of campus, your parents and management will be notified.")
+                qr_payload = f"student:{current_user['user_code']}"
+                qr_url = f"https://chart.googleapis.com/chart?cht=qr&chs=250x250&chl={urllib.parse.quote(qr_payload)}"
+                st.image(qr_url, caption="Your student QR code", use_column_width=False)
+                st.code(qr_payload)
+            else:
+                st.info("Security tracking is reserved for Redemption Gate staff, parents, students, and management.")
+
+    elif page == "Admin":
+        st.title("Admin — Controls")
+        if not st.session_state.user_id:
+            st.error("Sign in as a Super Admin or School Management user to access this page.")
+        else:
+            current_user = fetch_user_by_id(st.session_state.user_id)
+            if not current_user or current_user["role"] not in ["Super Admin", "School Management"]:
+                st.error("Admin access required. Sign in as a Super Admin or School Management user.")
+            else:
+                can_manage_users = current_user["role"] == "Super Admin"
+                st.subheader("User management")
+                with st.expander("Add a new user"):
+                    new_username = st.text_input("Username", key="new_user_username")
+                    new_password = st.text_input("Password", type="password", key="new_user_password")
+                    new_email = st.text_input("Email", key="new_user_email")
+                    new_phone = st.text_input("Phone number", key="new_user_phone")
+                    new_role = st.selectbox(
+                        "Role",
+                        ["Super Admin", "School Management", "Staff/Security", "Parent", "Student"],
+                        key="new_user_role",
                     )
-                    token_rows = cursor.fetchall()
-                    token_table = [
-                        {
-                            "id": tr[0],
-                            "user_id": tr[1],
-                            "username": tr[2],
-                            "token": tr[3],
-                            "expires_at": tr[4],
-                            "used": bool(tr[5]),
-                            "created_at": tr[6],
-                        }
-                        for tr in token_rows
-                    ]
-                    st.markdown("### Password Reset Tokens (sensitive)")
-                    st.dataframe(token_table)
-                except Exception as exc:
-                    st.error(f"Could not load reset tokens: {exc}")
+                    if st.button("Create user"):
+                        if not new_username.strip() or not new_password:
+                            st.error("Username and password are required.")
+                        else:
+                            user = create_user_with_email(
+                                new_username.strip(),
+                                new_password,
+                                email=new_email.strip() if new_email else None,
+                                phone=new_phone.strip() if new_phone else None,
+                                role=new_role,
+                                active=1,
+                            )
+                            if user is None:
+                                st.error("Could not create user. The username, email, or phone may already be in use.")
+                            else:
+                                st.success(f"Created {user['username']} as {user['role']}.")
 
-            conn.close()
+                with st.expander("Add parent-child relationship"):
+                    parents = get_all_users_except_current(0)
+                    parent_options = [u["username"] for u in parents if fetch_user_by_id(u["id"])["role"] == "Parent"]
+                    student_options = [u["username"] for u in parents if fetch_user_by_id(u["id"])["role"] == "Student"]
+                    parent_username = st.selectbox("Parent", [""] + parent_options, key="parent_select")
+                    student_username = st.selectbox("Student", [""] + student_options, key="student_select")
+                    if st.button("Link parent and student"):
+                        if parent_username and student_username:
+                            parent_user = fetch_user(parent_username)
+                            student_user = fetch_user(student_username)
+                            if parent_user and student_user:
+                                create_parent_child_relation(parent_user["id"], student_user["id"])
+                                st.success("Parent and student linked successfully.")
+                            else:
+                                st.error("Could not find the selected parent or student.")
+                        else:
+                            st.error("Select both a parent and a student.")
+
+                st.markdown("---")
+                st.subheader("School settings")
+                zone = get_safe_zone()
+                center_lat = st.number_input("Safe perimeter center latitude", value=zone["center_lat"], format="%.6f")
+                center_lng = st.number_input("Safe perimeter center longitude", value=zone["center_lng"], format="%.6f")
+                radius_m = st.number_input("Safe perimeter radius (meters)", value=float(zone["radius_meters"]), min_value=10.0)
+                raw_cutoff = get_setting("pickup_cutoff")
+                if raw_cutoff:
+                    try:
+                        pickup_cutoff = json.loads(raw_cutoff)
+                    except Exception:
+                        pickup_cutoff = raw_cutoff
+                else:
+                    pickup_cutoff = "15:00"
+                pickup_cutoff = st.text_input("Pickup cutoff time (HH:MM)", value=pickup_cutoff)
+                if st.button("Save school settings"):
+                    update_safe_zone(center_lat, center_lng, radius_m)
+                    set_setting("pickup_cutoff", pickup_cutoff)
+                    st.success("School settings updated.")
+
+                st.markdown("---")
+                st.subheader("User directory")
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, username, email, phone, role, active, created_at FROM users ORDER BY created_at"
+                )
+                rows = cursor.fetchall()
+                conn.close()
+
+                user_table = [
+                    {
+                        "id": r[0],
+                        "username": r[1],
+                        "email": r[2],
+                        "phone": r[3],
+                        "role": r[4],
+                        "active": bool(r[5]),
+                        "created_at": r[6],
+                    }
+                    for r in rows
+                ]
+                st.dataframe(user_table)
+
+                if can_manage_users:
+                    import csv
+                    from io import StringIO
+
+                    csv_buf = StringIO()
+                    writer = csv.DictWriter(csv_buf, fieldnames=user_table[0].keys() if user_table else ["id", "username"])
+                    if user_table:
+                        writer.writeheader()
+                        writer.writerows(user_table)
+                    st.download_button("Download users CSV", csv_buf.getvalue(), file_name="users.csv", mime="text/csv")
+
+                st.markdown("---")
+                st.subheader("Security and scan reports")
+                scan_events = get_all_scan_events()
+                st.write(f"Total scanned gate events: {len(scan_events)}")
+                st.dataframe(scan_events)
+
+                geofence_events = get_geofence_events()
+                st.write(f"Geofence alerts: {len(geofence_events)}")
+                st.dataframe(geofence_events)
+
+                late_pickups = get_late_pickups()
+                st.write(f"Late pickup events: {len(late_pickups)}")
+                st.dataframe(late_pickups)
+
+                safety_events = get_safety_events()
+                st.write(f"Safety events flagged: {len(safety_events)}")
+                st.dataframe(safety_events)
+
+                if st.button("Download scan report CSV"):
+                    import csv
+                    from io import StringIO
+
+                    csv_buf = StringIO()
+                    fieldnames = [
+                        "id",
+                        "student_user_id",
+                        "student_username",
+                        "scanner_id",
+                        "scanner_username",
+                        "event_type",
+                        "location",
+                        "latitude",
+                        "longitude",
+                        "notes",
+                        "created_at",
+                    ]
+                    writer = csv.DictWriter(csv_buf, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(scan_events)
+                    st.download_button("Download scan report", csv_buf.getvalue(), file_name="scan_report.csv", mime="text/csv")
 
     else:
         st.title("Account")
-        auth_action = st.radio("What do you want to do?", ["Login", "Register"])
+        st.info("Only Redemption Gate staff, students, parents, and management may sign in. User accounts are created by administrators only.")
         with st.form("auth_form"):
-            username = st.text_input("Username", key="auth_username")
+            username = st.text_input("Username or email", key="auth_username")
             password = st.text_input("Password", type="password", key="auth_password")
-            confirm_password = None
-            email = None
-            if auth_action == "Register":
-                confirm_password = st.text_input(
-                    "Confirm password",
-                    type="password",
-                    key="auth_confirm_password",
-                )
-                email = st.text_input("Email (optional)", key="auth_email")
-            submitted = st.form_submit_button("Continue")
+            submitted = st.form_submit_button("Sign in")
 
             if submitted:
                 if not username.strip() or not password:
-                    st.error("Username and password are required.")
-                elif auth_action == "Register" and password != confirm_password:
-                    st.error("Passwords do not match.")
-                elif auth_action == "Register":
-                    user = create_user_with_email(username.strip(), password, email.strip() if email and email.strip() else None)
-                    if user is None:
-                        st.error("That username or email is already taken.")
-                    else:
-                        st.success("Registration successful. You are now signed in.")
-                        st.session_state.username = user["username"]
-                        st.session_state.user_id = user["id"]
-                        st.rerun()
+                    st.error("Username/email and password are required.")
                 else:
                     user = authenticate_user(username.strip(), password)
                     if user is None:
-                        st.error("Invalid username/email or password.")
+                        st.error("Invalid credentials or inactive account.")
                     else:
                         st.success("Sign in successful.")
                         st.session_state.username = user["username"]
                         st.session_state.user_id = user["id"]
                         st.session_state.email = user.get("email") or ""
+                        st.session_state.role = user.get("role")
                         st.rerun()
 
         if st.session_state.auth_message:
@@ -1515,7 +2244,6 @@ def main():
                                 send_reset_email(user.get("email"), token)
                                 st.success("Password reset email sent. Check your inbox.")
                             else:
-                                # No email on record; record the token server-side for admin handling
                                 st.info("No email on record — password reset request recorded. Contact an administrator.")
                                 try:
                                     with open("password_reset_tokens.log", "a", encoding="utf-8") as logf:
@@ -1523,7 +2251,6 @@ def main():
                                 except Exception as log_exc:
                                     st.error(f"Could not record reset token on server: {log_exc}")
                         except Exception as exc:
-                            # Don't expose tokens in the frontend when email fails. Record server-side instead.
                             st.warning("Password reset requested; email delivery failed. The request has been recorded for administrator handling.")
                             try:
                                 with open("password_reset_tokens.log", "a", encoding="utf-8") as logf:
