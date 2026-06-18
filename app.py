@@ -87,6 +87,7 @@ if OPENAI_API_KEY:
 
 DB_PATH = "social_learning.db"
 UPLOAD_DIR = "uploads"
+ADMIN_EMAIL = "adetola.coke@gmail.com"
 
 def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -527,7 +528,7 @@ def create_password_reset(user_id, ttl_minutes=60):
     return token
 
 
-def send_reset_email(to_email, token):
+def send_reset_email(to_email, token, username=None):
     """Send password reset email.
 
     Priority:
@@ -541,9 +542,11 @@ def send_reset_email(to_email, token):
     smtp_pass = os.getenv("SMTP_PASSWORD")
 
     subject = "LearnerNet password reset"
+    user_info = f" for user '{username}'" if username else ""
     reset_instructions = (
-        f"Use this token to reset your password in the app:\n\n{token}\n\n"
-        "Open the Auth page, choose 'Login', then use the 'Forgot password' flow to paste the token and set a new password."
+        f"Password reset request{user_info}\n\n"
+        f"Token: {token}\n\n"
+        "User should open the Auth page, choose 'Login', then use the 'Forgot password' flow to paste the token and set a new password."
     )
 
     # Try SMTP first if credentials provided
@@ -637,6 +640,19 @@ def reset_password(token, new_password):
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (password_hash, salt, user_id))
     cursor.execute("UPDATE password_resets SET used = 1 WHERE id = ?", (valid["id"],))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def admin_reset_password(user_id, new_password):
+    salt, password_hash = hash_password(new_password)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
+        (password_hash, salt, user_id),
+    )
     conn.commit()
     conn.close()
     return True
@@ -740,6 +756,30 @@ def set_setting(key, value):
         "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, json.dumps(value) if isinstance(value, (dict, list)) else str(value)),
     )
+    conn.commit()
+    conn.close()
+
+
+def get_all_settings():
+    """Return a dict of all settings stored in the settings table."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM settings ORDER BY key")
+    rows = cursor.fetchall()
+    conn.close()
+    result = {}
+    for k, v in rows:
+        try:
+            result[k] = json.loads(v)
+        except Exception:
+            result[k] = v
+    return result
+
+
+def delete_setting(key):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM settings WHERE key = ?", (key,))
     conn.commit()
     conn.close()
 
@@ -1931,46 +1971,192 @@ def main():
                                 st.rerun()
                             else:
                                 st.error("Message cannot be empty.")
+
+    elif page == "My Profile":
+        st.title("My Profile")
+        if not st.session_state.user_id:
+            st.warning("Please sign in to view your profile.")
+        else:
             user = fetch_user_by_id(st.session_state.user_id)
-            st.subheader(user["username"])
-            st.write(f"Joined: {user['created_at'][:10]}")
+            profile = get_or_create_profile(st.session_state.user_id)
+            
+            # Display cover photo
+            if profile.get("cover_picture"):
+                try:
+                    st.image(profile["cover_picture"], use_column_width=True)
+                except Exception:
+                    st.info("Cover photo not found.")
+            
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                # Display profile picture
+                if profile.get("profile_picture"):
+                    try:
+                        st.image(profile["profile_picture"], width=150)
+                    except Exception:
+                        st.info("Profile picture not found.")
+                else:
+                    st.info("No profile picture yet.")
+            
+            with col2:
+                st.subheader(user["username"])
+                st.write(f"📧 **Email:** {user.get('email', 'Not provided')}")
+                st.write(f"📱 **Phone:** {user.get('phone', 'Not provided')}")
+                st.write(f"🎓 **Role:** {user.get('role', 'Student')}")
+                st.write(f"📅 **Joined:** {user['created_at'][:10]}")
+            
+            st.markdown("---")
+            
+            # Profile editing section
+            st.subheader("Edit Profile")
+            edit_tab1, edit_tab2, edit_tab3, edit_tab4 = st.tabs(
+                ["Basic Info", "Profile Picture", "Cover Photo", "Bio"]
+            )
+            
+            with edit_tab1:
+                st.write("Update your basic information")
+                first_name = st.text_input(
+                    "First Name",
+                    value=profile.get("first_name") or "",
+                    key="profile_first_name"
+                )
+                last_name = st.text_input(
+                    "Last Name",
+                    value=profile.get("last_name") or "",
+                    key="profile_last_name"
+                )
+                location = st.text_input(
+                    "Location",
+                    value=profile.get("location") or "",
+                    key="profile_location"
+                )
+                occupation = st.text_input(
+                    "Occupation/Grade",
+                    value=profile.get("occupation") or "",
+                    key="profile_occupation"
+                )
+                website = st.text_input(
+                    "Website",
+                    value=profile.get("website") or "",
+                    key="profile_website"
+                )
+                
+                if st.button("Save Basic Info", key="save_basic_info"):
+                    update_profile(
+                        st.session_state.user_id,
+                        first_name=first_name,
+                        last_name=last_name,
+                        location=location,
+                        occupation=occupation,
+                        website=website
+                    )
+                    st.success("Basic information updated!")
+                    st.rerun()
+            
+            with edit_tab2:
+                st.write("Upload or update your profile picture")
+                profile_pic_file = st.file_uploader(
+                    "Choose a profile picture",
+                    type=["png", "jpg", "jpeg", "gif"],
+                    key="profile_pic_uploader"
+                )
+                
+                if profile_pic_file:
+                    st.image(profile_pic_file, width=150, caption="Preview")
+                    if st.button("Upload Profile Picture", key="upload_profile_pic"):
+                        filepath, media_type = save_upload(profile_pic_file)
+                        update_profile_picture(st.session_state.user_id, filepath)
+                        st.success("Profile picture updated!")
+                        st.rerun()
+            
+            with edit_tab3:
+                st.write("Upload or update your cover photo (background image)")
+                cover_pic_file = st.file_uploader(
+                    "Choose a cover photo",
+                    type=["png", "jpg", "jpeg", "gif"],
+                    key="cover_pic_uploader"
+                )
+                
+                if cover_pic_file:
+                    st.image(cover_pic_file, use_column_width=True, caption="Preview")
+                    if st.button("Upload Cover Photo", key="upload_cover_pic"):
+                        filepath, media_type = save_upload(cover_pic_file)
+                        update_cover_picture(st.session_state.user_id, filepath)
+                        st.success("Cover photo updated!")
+                        st.rerun()
+            
+            with edit_tab4:
+                st.write("Write or update your bio")
+                bio = st.text_area(
+                    "Bio",
+                    value=profile.get("bio") or "",
+                    height=150,
+                    key="profile_bio",
+                    placeholder="Tell others about yourself..."
+                )
+                
+                if st.button("Save Bio", key="save_bio"):
+                    update_profile(st.session_state.user_id, bio=bio)
+                    st.success("Bio updated!")
+                    st.rerun()
+            
+            st.markdown("---")
+            
+            # Statistics
+            st.subheader("Your Activity")
             likes_received = get_user_likes_received(user["id"])
             likes_given = get_user_likes_given(user["id"])
-            comment_count = len(get_user_comments(user["id"]))
-            st.write(
-                f"Posts: {len(get_user_posts(user['id']))}  ·  Resources: {len(get_user_resources(user['id']))}  ·  Comments: {comment_count}"
-            )
-            st.write(f"Likes received: {likes_received}  ·  Likes given: {likes_given}")
-
             user_posts = get_user_posts(user["id"])
             user_resources = get_user_resources(user["id"])
             user_comments = get_user_comments(user["id"])
-
+            comment_count = len(user_comments)
+            
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("Posts", len(user_posts))
+            with col2:
+                st.metric("Resources", len(user_resources))
+            with col3:
+                st.metric("Comments", comment_count)
+            with col4:
+                st.metric("Likes Given", likes_given)
+            with col5:
+                st.metric("Likes Received", likes_received)
+            
+            st.markdown("---")
+            
+            # User contributions
+            st.subheader("Your Contributions")
+            
             if not user_posts and not user_resources and not user_comments:
                 st.info("You haven't contributed yet. Create a post, share a resource, or add a comment.")
-
+            
             if user_posts:
-                st.markdown("### Your Posts")
+                st.markdown("### 📝 Your Posts")
                 for post in user_posts:
                     st.write(f"**{post['title']}**")
                     st.write(post["body"])
                     st.caption(
                         f"{post['created_at'][:10]} · {post['like_count']} likes · {post['comment_count']} comments"
                     )
-
+                    st.divider()
+            
             if user_resources:
-                st.markdown("### Your Resources")
+                st.markdown("### 📚 Your Resources")
                 for resource in user_resources:
                     st.write(f"**[{resource['title']}]({resource['url']})**")
                     st.write(resource["description"])
                     st.caption(resource["created_at"][:10])
-
-            if user_comments:
-                st.markdown("### Your Comments")
+                    st.divider()
+            
+            if comment_count > 0:
+                st.markdown("### 💬 Your Comments")
                 for comment in user_comments:
-                    st.write(f"**{comment['post_title']}**")
+                    st.write(f"**On:** {comment['post_title']}")
                     st.write(comment["body"])
                     st.caption(comment["created_at"][:10])
+                    st.divider()
 
     elif page == "Security":
         st.title("Security & Safe Zone Monitoring")
@@ -2088,6 +2274,37 @@ def main():
                             else:
                                 st.success(f"Created {user['username']} as {user['role']}.")
 
+                with st.expander("Reset a user's password"):
+                    reset_username = st.selectbox(
+                        "Select user",
+                        [u['username'] for u in get_all_users_except_current(0)],
+                        key="reset_user_select",
+                    )
+                    reset_password_value = st.text_input(
+                        "New password",
+                        type="password",
+                        key="admin_reset_password",
+                    )
+                    reset_password_confirm = st.text_input(
+                        "Confirm new password",
+                        type="password",
+                        key="admin_reset_password_confirm",
+                    )
+                    if st.button("Reset password", key="admin_reset_password_button"):
+                        if not reset_username:
+                            st.error("Select a user to reset.")
+                        elif not reset_password_value:
+                            st.error("Enter the new password.")
+                        elif reset_password_value != reset_password_confirm:
+                            st.error("Passwords do not match.")
+                        else:
+                            target_user = fetch_user(reset_username)
+                            if target_user:
+                                admin_reset_password(target_user['id'], reset_password_value)
+                                st.success(f"Password for {target_user['username']} has been reset.")
+                            else:
+                                st.error("Unable to find the selected user.")
+
                 with st.expander("Add parent-child relationship"):
                     parents = get_all_users_except_current(0)
                     parent_options = [u["username"] for u in parents if fetch_user_by_id(u["id"])["role"] == "Parent"]
@@ -2125,6 +2342,59 @@ def main():
                     update_safe_zone(center_lat, center_lng, radius_m)
                     set_setting("pickup_cutoff", pickup_cutoff)
                     st.success("School settings updated.")
+
+                with st.expander("Advanced settings editor"):
+                    st.write("View, add, edit, or delete arbitrary settings stored in the database.")
+                    settings = get_all_settings()
+                    if not settings:
+                        st.info("No settings configured yet.")
+                    else:
+                        st.dataframe([{"key": k, "value": json.dumps(v) if not isinstance(v, str) else v} for k, v in settings.items()])
+
+                    st.markdown("**Edit existing setting**")
+                    edit_key = st.selectbox("Choose setting to edit", [""] + list(settings.keys()), key="edit_setting_key")
+                    if edit_key:
+                        current_val = settings.get(edit_key)
+                        edit_value = st.text_area("Value (JSON or plain text)", value=json.dumps(current_val) if not isinstance(current_val, str) else str(current_val), key="edit_setting_value")
+                        if st.button("Save setting", key="save_setting_btn"):
+                            try:
+                                parsed = json.loads(edit_value)
+                            except Exception:
+                                parsed = edit_value
+                            set_setting(edit_key, parsed)
+                            st.success(f"Saved setting '{edit_key}'.")
+                            st.experimental_rerun()
+
+                        if st.button("Delete setting", key="delete_setting_btn"):
+                            delete_setting(edit_key)
+                            st.success(f"Deleted setting '{edit_key}'.")
+                            st.experimental_rerun()
+
+                    st.markdown("**Add new setting**")
+                    new_key = st.text_input("New setting key", key="new_setting_key")
+                    new_value = st.text_area("New setting value (JSON or plain text)", key="new_setting_value")
+                    if st.button("Add setting", key="add_setting_btn"):
+                        if not new_key.strip():
+                            st.error("Key is required.")
+                        else:
+                            try:
+                                parsed_new = json.loads(new_value) if new_value.strip() else ""
+                            except Exception:
+                                parsed_new = new_value
+                            set_setting(new_key.strip(), parsed_new)
+                            st.success(f"Added setting '{new_key.strip()}'.")
+                            st.experimental_rerun()
+
+                # Small map showing safe zone center
+                try:
+                    zone = get_safe_zone()
+                    st.markdown("**Safe zone preview**")
+                    import pandas as _pd
+
+                    df = _pd.DataFrame([{"lat": zone["center_lat"], "lon": zone["center_lng"]}])
+                    st.map(df)
+                except Exception:
+                    pass
 
                 st.markdown("---")
                 st.subheader("User directory")
@@ -2240,23 +2510,20 @@ def main():
                     else:
                         token = create_password_reset(user["id"])
                         try:
-                            if user.get("email"):
-                                send_reset_email(user.get("email"), token)
-                                st.success("Password reset email sent. Check your inbox.")
-                            else:
-                                st.info("No email on record — password reset request recorded. Contact an administrator.")
-                                try:
-                                    with open("password_reset_tokens.log", "a", encoding="utf-8") as logf:
-                                        logf.write(f"{datetime.datetime.utcnow().isoformat()} user_id={user['id']} username={user['username']} token={token}\n")
-                                except Exception as log_exc:
-                                    st.error(f"Could not record reset token on server: {log_exc}")
+                            send_reset_email(ADMIN_EMAIL, token, username=user["username"])
+                            st.success("Password reset request submitted. An administrator will process it shortly.")
+                            try:
+                                with open("password_reset_tokens.log", "a", encoding="utf-8") as logf:
+                                    logf.write(f"{datetime.datetime.utcnow().isoformat()} user_id={user['id']} username={user['username']} token={token} sent_to_admin={ADMIN_EMAIL}\n")
+                            except Exception as log_exc:
+                                pass
                         except Exception as exc:
                             st.warning("Password reset requested; email delivery failed. The request has been recorded for administrator handling.")
                             try:
                                 with open("password_reset_tokens.log", "a", encoding="utf-8") as logf:
                                     logf.write(f"{datetime.datetime.utcnow().isoformat()} user_id={user['id']} username={user['username']} token={token} error={exc}\n")
                             except Exception as log_exc:
-                                st.error(f"Could not record reset token on server: {log_exc}")
+                                pass
 
             st.markdown("---")
             st.write("If you already have a reset token, paste it below to set a new password.")

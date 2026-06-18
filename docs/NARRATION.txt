@@ -1,0 +1,37 @@
+Intro: (10s)
+Welcome to LearnerNet — a school-focused social and safety dashboard. In this short demo I'll show how to run the app, configure settings, and demonstrate safety features.
+
+Install & run: (40s)
+First, install dependencies:
+python -m pip install -r requirements.txt
+
+Initialize the database and sample data:
+python -c "from app import init_db, ensure_upload_dir, ensure_sample_data; init_db(); ensure_upload_dir(); ensure_sample_data()"
+
+Then start the app:
+streamlit run app.py
+
+Environment & security: (40s)
+The app uses environment variables for optional services. Set these carefully and never show secrets on camera. Key vars: OPENAI_API_KEY, SMTP credentials, Twilio credentials, and EMERGENCY_SMS_RECIPIENTS.
+
+Super Admin login: (30s)
+Log in as the seeded Super Admin (or create an account). Navigate the feed, profiles, and posts to show the UI.
+
+Safety features demo: (60s)
+Create a post containing a flagged keyword, for example "threat". The app will record the flagged content in the safety_events table. Show the safety events view to confirm.
+
+Simulate QR scan/geofence: (45s)
+From a REPL, run a quick command to insert a QR scan or geofence event and then show the QR scans or geofence events pages.
+
+Password reset & notifications: (40s)
+Generate a password reset token for a user and show the steps to send a reset email. Explain that SMTP or Gmail OAuth must be configured for delivery. Also explain Twilio config for SMS alerts.
+
+Wrap up: (20s)
+Summarize production recommendations: run behind TLS, use a secrets manager, migrate SQLite to a managed DB, and set a stronger password policy.
+
+Recording cues
+- Pause briefly between sections.
+- When showing commands, let the terminal sit so viewers can read.
+- Mention file paths used: social_learning.db and uploads/.
+
+End of narration.
