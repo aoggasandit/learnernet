@@ -90,7 +90,14 @@ UPLOAD_DIR = "uploads"
 ADMIN_EMAIL = "adetola.coke@gmail.com"
 
 def get_connection():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -2000")
+    return conn
 
 
 def hash_password(password, salt=None):
@@ -319,6 +326,28 @@ def init_db():
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_receiver_id ON messages(receiver_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_parent_child_relations_parent_user_id ON parent_child_relations(parent_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_parent_child_relations_student_user_id ON parent_child_relations(student_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_qr_scans_student_user_id ON qr_scans(student_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_geofence_events_student_user_id ON geofence_events(student_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_user_date ON ai_usage(user_id, created_at)")
 
     cursor.execute("PRAGMA table_info(users)")
     existing_columns = [row[1] for row in cursor.fetchall()]
@@ -339,6 +368,14 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def perform_startup_maintenance():
+    # Cleanup old AI usage records and ensure the database remains responsive.
+    try:
+        clean_old_ai_usage(days=90)
+    except Exception:
+        pass
 
 
 def ensure_upload_dir():
@@ -407,28 +444,6 @@ def display_media(media_items):
                 st.write(f"Media: {media['filename']}")
         except FileNotFoundError:
             st.warning(f"Uploaded file not found: {media['filename']}")
-
-
-def add_comment(post_id, user_id, body):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, username, created_at, password_hash, salt FROM users WHERE username = ?",
-        (username,),
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return (
-        dict(
-            id=row[0],
-            username=row[1],
-            created_at=row[2],
-            password_hash=row[3],
-            salt=row[4],
-        )
-        if row
-        else None
-    )
 
 
 def fetch_user_by_id(user_id):
@@ -511,6 +526,90 @@ def fetch_user_by_email(email):
         if row
         else None
     )
+
+
+def get_ai_usage_count(user_id):
+    today = datetime.datetime.utcnow().date().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM ai_usage WHERE user_id = ? AND date(created_at) = ?",
+        (user_id, today),
+    )
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def record_ai_usage(user_id, action_type):
+    conn = get_connection()
+    cursor = conn.cursor()
+    created_at = datetime.datetime.utcnow().isoformat()
+    cursor.execute(
+        "INSERT INTO ai_usage (user_id, action_type, created_at) VALUES (?, ?, ?)",
+        (user_id, action_type, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clean_old_ai_usage(days=30):
+    conn = get_connection()
+    cursor = conn.cursor()
+    threshold = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+    cursor.execute(
+        "DELETE FROM ai_usage WHERE created_at < ?",
+        (threshold,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def ai_usage_limit_reached(user_id):
+    user = fetch_user_by_id(user_id)
+    if not user or user["role"] not in ["Parent", "Student"]:
+        return False
+    return get_ai_usage_count(user_id) >= 5
+
+
+def can_reset_password_for_target(current_user, target_user):
+    if current_user is None or target_user is None:
+        return False
+    if current_user["role"] == "Super Admin":
+        return True
+    if target_user["role"] in ["Super Admin", "School Management"]:
+        return False
+    return current_user["role"] in ["School Management"]
+
+
+def generate_ai_image_for_user(user_id, prompt, size="1024x1024"):
+    if ai_usage_limit_reached(user_id):
+        raise ValueError(
+            "AI image and document usage limit reached for today. Parents and students may use these features up to 5 times per day."
+        )
+    image_bytes = generate_ai_image(prompt, size=size)
+    record_ai_usage(user_id, "image_generation")
+    return image_bytes
+
+
+def edit_ai_image_for_user(user_id, prompt, image_bytes, filename, size="1024x1024"):
+    if ai_usage_limit_reached(user_id):
+        raise ValueError(
+            "AI image and document usage limit reached for today. Parents and students may use these features up to 5 times per day."
+        )
+    result = edit_ai_image(prompt, image_bytes, filename, size=size)
+    record_ai_usage(user_id, "image_edit")
+    return result
+
+
+def format_ai_document_for_user(user_id, source_text, instruction, style="Summary"):
+    if ai_usage_limit_reached(user_id):
+        raise ValueError(
+            "AI image and document usage limit reached for today. Parents and students may use these features up to 5 times per day."
+        )
+    document_text = format_ai_document(source_text, instruction, style=style)
+    record_ai_usage(user_id, "document_format")
+    return document_text
 
 
 def create_password_reset(user_id, ttl_minutes=60):
@@ -1697,6 +1796,7 @@ def display_resources():
 
 def main():
     init_db()
+    perform_startup_maintenance()
     ensure_upload_dir()
     ensure_sample_data()
     st.set_page_config(page_title="ScholarsNet", page_icon="📚", layout="wide")
@@ -1797,99 +1897,118 @@ def main():
 
     elif page == "AI Research Assistant":
         st.title("AI Research Assistant")
-        st.write(
-            "Ask the AI for research guidance, summaries, study plans, or learning suggestions."
-        )
-        question = st.text_area("What would you like help with?", height=150)
-        if st.button("Ask AI"):
-            if question.strip():
-                with st.spinner("Querying the AI..."):
-                    answer = ai_research_answer(question.strip())
-                st.markdown(answer)
-            else:
-                st.error("Please enter a question first.")
+        if not st.session_state.user_id:
+            st.warning("Please sign in to access AI features.")
+        else:
+            st.write(
+                "Ask the AI for research guidance, summaries, study plans, or learning suggestions."
+            )
+            question = st.text_area("What would you like help with?", height=150)
+            if st.button("Ask AI"):
+                if question.strip():
+                    with st.spinner("Querying the AI..."):
+                        answer = ai_research_answer(question.strip())
+                    st.markdown(answer)
+                else:
+                    st.error("Please enter a question first.")
 
     elif page == "AI Media Studio":
         st.title("AI Media Studio")
-        st.write("Generate or edit images, videos, and documents with AI.")
+        if not st.session_state.user_id:
+            st.warning("Please sign in to access AI features.")
+        else:
+            st.write("Generate or edit images, videos, and documents with AI.")
 
-        with st.expander("Generate a new image"):
-            image_prompt = st.text_area("Describe the image you want to create", height=120)
-            image_size = st.selectbox("Image size", ["512x512", "1024x1024"], index=1)
-            if st.button("Generate Image"):
-                if image_prompt.strip():
-                    with st.spinner("Generating image..."):
-                        try:
-                            image_bytes = generate_ai_image(image_prompt.strip(), size=image_size)
-                            st.image(image_bytes, caption="Generated image", use_column_width=True)
-                            st.download_button(
-                                "Download image",
-                                data=image_bytes,
-                                file_name="generated_image.png",
-                                mime="image/png",
-                            )
-                        except Exception as exc:
-                            st.error(f"AI request failed: {exc}")
-                else:
-                    st.error("Enter an image description first.")
+            with st.expander("Generate a new image"):
+                image_prompt = st.text_area("Describe the image you want to create", height=120)
+                image_size = st.selectbox("Image size", ["512x512", "1024x1024"], index=1)
+                if st.button("Generate Image"):
+                    if image_prompt.strip():
+                        with st.spinner("Generating image..."):
+                            try:
+                                image_bytes = generate_ai_image_for_user(
+                                    st.session_state.user_id,
+                                    image_prompt.strip(),
+                                    size=image_size,
+                                )
+                                st.image(image_bytes, caption="Generated image", use_column_width=True)
+                                st.download_button(
+                                    "Download image",
+                                    data=image_bytes,
+                                    file_name="generated_image.png",
+                                    mime="image/png",
+                                )
+                            except Exception as exc:
+                                st.error(f"AI request failed: {exc}")
+                    else:
+                        st.error("Enter an image description first.")
 
-        with st.expander("Edit an existing image"):
-            edit_prompt = st.text_area("Describe how to edit the image", height=100)
-            edit_image_file = st.file_uploader("Upload an image to edit", type=["png", "jpg", "jpeg"], key="edit_image")
-            edit_size = st.selectbox("Edit size", ["512x512", "1024x1024"], index=1)
-            if st.button("Edit Image"):
-                if edit_prompt.strip() and edit_image_file is not None:
-                    with st.spinner("Editing image..."):
-                        try:
-                            image_bytes = edit_ai_image(
-                                edit_prompt.strip(),
-                                edit_image_file.getbuffer(),
-                                edit_image_file.name,
-                                size=edit_size,
-                            )
-                            st.image(image_bytes, caption="Edited image", use_column_width=True)
-                            st.download_button(
-                                "Download edited image",
-                                data=image_bytes,
-                                file_name="edited_image.png",
-                                mime="image/png",
-                            )
-                        except Exception as exc:
-                            st.error(f"AI request failed: {exc}")
-                else:
-                    st.error("Provide both an image and an edit prompt.")
+            with st.expander("Edit an existing image"):
+                edit_prompt = st.text_area("Describe how to edit the image", height=100)
+                edit_image_file = st.file_uploader("Upload an image to edit", type=["png", "jpg", "jpeg"], key="edit_image")
+                edit_size = st.selectbox("Edit size", ["512x512", "1024x1024"], index=1)
+                if st.button("Edit Image"):
+                    if edit_prompt.strip() and edit_image_file is not None:
+                        with st.spinner("Editing image..."):
+                            try:
+                                image_bytes = edit_ai_image_for_user(
+                                    st.session_state.user_id,
+                                    edit_prompt.strip(),
+                                    edit_image_file.getbuffer(),
+                                    edit_image_file.name,
+                                    size=edit_size,
+                                )
+                                st.image(image_bytes, caption="Edited image", use_column_width=True)
+                                st.download_button(
+                                    "Download edited image",
+                                    data=image_bytes,
+                                    file_name="edited_image.png",
+                                    mime="image/png",
+                                )
+                            except Exception as exc:
+                                st.error(f"AI request failed: {exc}")
+                    else:
+                        st.error("Provide both an image and an edit prompt.")
 
-        with st.expander("Generate or format a document"):
-            doc_source = st.text_area("Paste your document text or topic prompt", height=140)
-            instruction = st.selectbox(
-                "Document action",
-                [
-                    "Create a polished study guide",
-                    "Summarize the text",
-                    "Rewrite as a formatted report",
-                    "Create concise study notes",
-                ],
-            )
-            doc_style = st.selectbox("Output style", ["Professional", "Learning guide", "Bullet list", "Essay"], index=1)
-            if st.button("Format Document"):
-                if doc_source.strip():
-                    with st.spinner("Formatting document..."):
-                        document_text = format_ai_document(doc_source.strip(), instruction, style=doc_style)
-                        st.markdown(document_text)
-                        st.download_button(
-                            "Download text document",
-                            data=document_text,
-                            file_name="ai_document.txt",
-                            mime="text/plain",
-                        )
-                        st.download_button(
-                            "Download markdown document",
-                            data=document_text,
-                            file_name="ai_document.md",
-                            mime="text/markdown",
-                        )
-                else:
-                    st.error("Enter text or a topic before formatting.")
+            with st.expander("Generate or format a document"):
+                doc_source = st.text_area("Paste your document text or topic prompt", height=140)
+                instruction = st.selectbox(
+                    "Document action",
+                    [
+                        "Create a polished study guide",
+                        "Summarize the text",
+                        "Rewrite as a formatted report",
+                        "Create concise study notes",
+                    ],
+                )
+                doc_style = st.selectbox("Output style", ["Professional", "Learning guide", "Bullet list", "Essay"], index=1)
+                if st.button("Format Document"):
+                    if doc_source.strip():
+                        with st.spinner("Formatting document..."):
+                            try:
+                                document_text = format_ai_document_for_user(
+                                    st.session_state.user_id,
+                                    doc_source.strip(),
+                                    instruction,
+                                    style=doc_style,
+                                )
+                                st.markdown(document_text)
+                                st.download_button(
+                                    "Download text document",
+                                    data=document_text,
+                                    file_name="ai_document.txt",
+                                    mime="text/plain",
+                                )
+                                st.download_button(
+                                    "Download markdown document",
+                                    data=document_text,
+                                    file_name="ai_document.md",
+                                    mime="text/markdown",
+                                )
+                            except Exception as exc:
+                                st.error(f"AI request failed: {exc}")
+                    else:
+                        st.error("Enter text or a topic before formatting.")
 
     elif page == "Direct Messages":
         st.title("Direct Messages")
@@ -2300,8 +2419,14 @@ def main():
                         else:
                             target_user = fetch_user(reset_username)
                             if target_user:
-                                admin_reset_password(target_user['id'], reset_password_value)
-                                st.success(f"Password for {target_user['username']} has been reset.")
+                                if can_reset_password_for_target(current_user, target_user):
+                                    admin_reset_password(target_user['id'], reset_password_value)
+                                    st.success(f"Password for {target_user['username']} has been reset.")
+                                else:
+                                    st.error(
+                                        "You do not have permission to reset this user's password. "
+                                        "Only a Super Admin may reset passwords for Super Admin or School Management accounts."
+                                    )
                             else:
                                 st.error("Unable to find the selected user.")
 
