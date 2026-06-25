@@ -3,15 +3,13 @@
 Script to grant Super Admin privileges to a user by email.
 """
 
-import sqlite3
+from db import get_connection
 
-DB_PATH = "social_learning.db"
 
 def grant_super_admin(email):
     """Grant Super Admin role to user with specified email."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = get_connection()
         cursor = conn.cursor()
         
         # Check if user exists
@@ -38,7 +36,7 @@ def grant_super_admin(email):
         
         return True
         
-    except sqlite3.Error as e:
+    except Exception as e:
         print(f"❌ Database error: {e}")
         return False
     finally:

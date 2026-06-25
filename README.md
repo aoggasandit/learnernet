@@ -18,7 +18,15 @@ A simple social learning app built with Streamlit and OpenAI. LearnerNet lets us
      ```bash
      export OPENAI_API_KEY="YOUR_KEY"
      ```
-4. Run the app:
+4. For PostgreSQL, set a `DATABASE_URL` environment variable instead of using the default SQLite file:
+   ```bash
+   export DATABASE_URL="postgresql://user:password@host:5432/dbname"
+   ```
+   or on Windows PowerShell:
+   ```powershell
+   $env:DATABASE_URL = "postgresql://user:password@host:5432/dbname"
+   ```
+5. Run the app:
    ```bash
    streamlit run app.py
    ```

@@ -6,7 +6,6 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -16,6 +15,8 @@ from email.message import EmailMessage
 from dotenv import load_dotenv
 import openai
 import streamlit as st
+
+from db import get_connection, is_postgres
 
 SAFE_KEYWORDS = [
     "kill",
@@ -85,19 +86,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
 
-DB_PATH = "social_learning.db"
 UPLOAD_DIR = "uploads"
 ADMIN_EMAIL = "adetola.coke@gmail.com"
-
-def get_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA cache_size = -2000")
-    return conn
 
 
 def hash_password(password, salt=None):
@@ -134,10 +124,12 @@ def analyze_text_safety(text):
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
+    id_column = "SERIAL PRIMARY KEY" if is_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT,
             salt TEXT,
@@ -151,9 +143,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             user_id INTEGER NOT NULL,
             title TEXT NOT NULL,
             body TEXT NOT NULL,
@@ -163,9 +155,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS resources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             user_id INTEGER,
             title TEXT NOT NULL,
             url TEXT NOT NULL,
@@ -176,9 +168,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             post_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             body TEXT NOT NULL,
@@ -189,9 +181,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS likes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             post_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             created_at TEXT NOT NULL,
@@ -202,9 +194,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             sender_id INTEGER NOT NULL,
             receiver_id INTEGER NOT NULL,
             body TEXT NOT NULL,
@@ -216,9 +208,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS post_media (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             post_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             filename TEXT NOT NULL,
@@ -231,9 +223,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS password_resets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             user_id INTEGER NOT NULL,
             token TEXT NOT NULL,
             expires_at TEXT NOT NULL,
@@ -244,9 +236,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             user_id INTEGER NOT NULL UNIQUE,
             profile_picture TEXT,
             cover_picture TEXT,
@@ -263,9 +255,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS parent_child_relations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             parent_user_id INTEGER NOT NULL,
             student_user_id INTEGER NOT NULL,
             created_at TEXT NOT NULL,
@@ -276,9 +268,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS qr_scans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             scanner_id INTEGER,
             student_user_id INTEGER NOT NULL,
             event_type TEXT NOT NULL,
@@ -293,9 +285,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS geofence_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             student_user_id INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             latitude REAL,
@@ -306,9 +298,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS safety_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             user_id INTEGER NOT NULL,
             content TEXT NOT NULL,
             category TEXT NOT NULL,
@@ -327,9 +319,9 @@ def init_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS ai_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             user_id INTEGER NOT NULL,
             action_type TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -349,8 +341,20 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_geofence_events_student_user_id ON geofence_events(student_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_user_date ON ai_usage(user_id, created_at)")
 
-    cursor.execute("PRAGMA table_info(users)")
-    existing_columns = [row[1] for row in cursor.fetchall()]
+    if is_postgres():
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'users' AND table_schema = 'public'
+            ORDER BY ordinal_position
+            """
+        )
+        existing_columns = [row[0] for row in cursor.fetchall()]
+    else:
+        cursor.execute("PRAGMA table_info(users)")
+        existing_columns = [row[1] for row in cursor.fetchall()]
+
     if "password_hash" not in existing_columns:
         cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
     if "salt" not in existing_columns:
