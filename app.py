@@ -1358,6 +1358,17 @@ def get_posts():
     ]
 
 
+def delete_post(post_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM likes WHERE post_id = ?", (post_id,))
+    cursor.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+    cursor.execute("DELETE FROM post_media WHERE post_id = ?", (post_id,))
+    cursor.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    conn.commit()
+    conn.close()
+
+
 def get_comments(post_id):
     conn = get_connection()
     cursor = conn.cursor()
@@ -1595,6 +1606,39 @@ def get_all_users_except_current(current_user_id):
     rows = cursor.fetchall()
     conn.close()
     return [{"id": row[0], "username": row[1]} for row in rows]
+
+
+def delete_user(user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM comments WHERE user_id = ? OR post_id IN (SELECT id FROM posts WHERE user_id = ?)",
+        (user_id, user_id),
+    )
+    cursor.execute(
+        "DELETE FROM likes WHERE user_id = ? OR post_id IN (SELECT id FROM posts WHERE user_id = ?)",
+        (user_id, user_id),
+    )
+    cursor.execute(
+        "DELETE FROM post_media WHERE user_id = ? OR post_id IN (SELECT id FROM posts WHERE user_id = ?)",
+        (user_id, user_id),
+    )
+    cursor.execute("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?", (user_id, user_id))
+    cursor.execute("DELETE FROM resources WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM password_resets WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
+    cursor.execute(
+        "DELETE FROM parent_child_relations WHERE parent_user_id = ? OR student_user_id = ?",
+        (user_id, user_id),
+    )
+    cursor.execute("DELETE FROM qr_scans WHERE scanner_id = ? OR student_user_id = ?", (user_id, user_id))
+    cursor.execute("DELETE FROM geofence_events WHERE student_user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM safety_events WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM posts WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
 
 def ai_research_answer(question):
@@ -2433,6 +2477,47 @@ def main():
                                     )
                             else:
                                 st.error("Unable to find the selected user.")
+
+                if can_manage_users:
+                    with st.expander("Delete a post"):
+                        posts = get_posts()
+                        post_options = {f"{p['id']} - {p['title']} ({p['username']})": p['id'] for p in posts}
+                        selected_post = st.selectbox(
+                            "Select a post to delete",
+                            [""] + list(post_options.keys()),
+                            key="delete_post_select",
+                        )
+                        if st.button("Delete post", key="delete_post_button"):
+                            if not selected_post:
+                                st.error("Select a post to delete.")
+                            else:
+                                delete_post(post_options[selected_post])
+                                st.success("Post deleted successfully.")
+                                st.experimental_rerun()
+
+                    with st.expander("Delete a user"):
+                        users = get_all_users_except_current(0)
+                        user_options = {u["username"]: u["id"] for u in users}
+                        selected_user = st.selectbox(
+                            "Select a user to delete",
+                            [""] + list(user_options.keys()),
+                            key="delete_user_select",
+                        )
+                        if st.button("Delete user", key="delete_user_button"):
+                            if not selected_user:
+                                st.error("Select a user to delete.")
+                            else:
+                                target_user = fetch_user(selected_user)
+                                if not target_user:
+                                    st.error("Unable to find the selected user.")
+                                elif target_user["id"] == current_user["id"]:
+                                    st.error("You cannot delete your own account.")
+                                elif target_user["role"] == "Super Admin":
+                                    st.error("Cannot delete another Super Admin account.")
+                                else:
+                                    delete_user(target_user["id"])
+                                    st.success(f"Deleted user {selected_user}.")
+                                    st.experimental_rerun()
 
                 with st.expander("Add parent-child relationship"):
                     parents = get_all_users_except_current(0)
