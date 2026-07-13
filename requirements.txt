@@ -6,3 +6,4 @@ google-auth-oauthlib
 google-api-python-client
 twilio
 psycopg2-binary
+qrcode[pil]

@@ -12,6 +12,7 @@ from pathlib import Path
 import smtplib
 from email.message import EmailMessage
 
+import qrcode
 from dotenv import load_dotenv
 import openai
 import streamlit as st
@@ -119,6 +120,25 @@ def analyze_text_safety(text):
                 "severity": "high",
             }
     return {"flagged": False, "reason": None, "severity": "low"}
+
+
+def generate_qr_image(data: str):
+    """Generate a QR code image from text data and return it as bytes."""
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Convert PIL Image to bytes
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format='PNG')
+    img_bytes.seek(0)
+    return img_bytes.getvalue()
 
 
 def init_db():
@@ -441,7 +461,7 @@ def display_media(media_items):
             with open(media["filepath"], "rb") as file_handle:
                 file_bytes = file_handle.read()
             if media["media_type"].startswith("image"):
-                st.image(file_bytes, caption=media["filename"], use_column_width=True)
+                st.image(file_bytes, caption=media["filename"], use_container_width=True)
             elif media["media_type"].startswith("video"):
                 st.video(file_bytes)
             else:
@@ -1979,7 +1999,7 @@ def main():
                                     image_prompt.strip(),
                                     size=image_size,
                                 )
-                                st.image(image_bytes, caption="Generated image", use_column_width=True)
+                                st.image(image_bytes, caption="Generated image", use_container_width=True)
                                 st.download_button(
                                     "Download image",
                                     data=image_bytes,
@@ -2006,7 +2026,7 @@ def main():
                                     edit_image_file.name,
                                     size=edit_size,
                                 )
-                                st.image(image_bytes, caption="Edited image", use_column_width=True)
+                                st.image(image_bytes, caption="Edited image", use_container_width=True)
                                 st.download_button(
                                     "Download edited image",
                                     data=image_bytes,
@@ -2150,7 +2170,7 @@ def main():
             # Display cover photo
             if profile.get("cover_picture"):
                 try:
-                    st.image(profile["cover_picture"], use_column_width=True)
+                    st.image(profile["cover_picture"], use_container_width=True)
                 except Exception:
                     st.info("Cover photo not found.")
             
@@ -2246,7 +2266,7 @@ def main():
                 )
                 
                 if cover_pic_file:
-                    st.image(cover_pic_file, use_column_width=True, caption="Preview")
+                    st.image(cover_pic_file, use_container_width=True, caption="Preview")
                     if st.button("Upload Cover Photo", key="upload_cover_pic"):
                         filepath, media_type = save_upload(cover_pic_file)
                         update_cover_picture(st.session_state.user_id, filepath)
@@ -2365,9 +2385,9 @@ def main():
                 if student_choice:
                     student_user = fetch_user(student_choice)
                     qr_payload = f"student:{student_user['user_code']}"
-                    qr_url = f"https://chart.googleapis.com/chart?cht=qr&chs=250x250&chl={urllib.parse.quote(qr_payload)}"
+                    qr_image = generate_qr_image(qr_payload)
                     st.markdown("#### Student QR code")
-                    st.image(qr_url, caption="Scan this QR code at the gate", use_column_width=False)
+                    st.image(qr_image, caption="Scan this QR code at the gate", width=250)
                     st.code(qr_payload)
 
                 st.markdown("---")
@@ -2397,8 +2417,8 @@ def main():
                 st.write("Your account is connected to the school safety network.")
                 st.write("If you scan in or out of campus, your parents and management will be notified.")
                 qr_payload = f"student:{current_user['user_code']}"
-                qr_url = f"https://chart.googleapis.com/chart?cht=qr&chs=250x250&chl={urllib.parse.quote(qr_payload)}"
-                st.image(qr_url, caption="Your student QR code", use_column_width=False)
+                qr_image = generate_qr_image(qr_payload)
+                st.image(qr_image, caption="Your student QR code", width=250)
                 st.code(qr_payload)
             else:
                 st.info("Security tracking is reserved for Redemption Gate staff, parents, students, and management.")
