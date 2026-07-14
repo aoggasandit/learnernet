@@ -2386,9 +2386,44 @@ def main():
                     )
                 
                 event_type = st.selectbox("Event type", ["Entry", "Exit", "Pickup"], key="security_event_type")
-                location = st.text_input("Location description", key="security_location")
-                latitude = st.number_input("Latitude", value=0.0, format="%.6f", key="security_lat")
-                longitude = st.number_input("Longitude", value=0.0, format="%.6f", key="security_lng")
+                
+                # Gate location selection
+                st.subheader("Location")
+                location_mode = st.radio(
+                    "Select location method:",
+                    ["Pre-configured gates", "Manual entry"],
+                    key="location_mode"
+                )
+                
+                if location_mode == "Pre-configured gates":
+                    # Common gate locations - can be customized
+                    gate_locations = {
+                        "Main Gate": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"], "lng": SAFE_PERIMETER_DEFAULT["center_lng"], "desc": "Main Gate"},
+                        "North Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"] + 0.001, "lng": SAFE_PERIMETER_DEFAULT["center_lng"], "desc": "North Entrance"},
+                        "South Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"] - 0.001, "lng": SAFE_PERIMETER_DEFAULT["center_lng"], "desc": "South Entrance"},
+                        "East Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"], "lng": SAFE_PERIMETER_DEFAULT["center_lng"] + 0.001, "desc": "East Entrance"},
+                        "West Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"], "lng": SAFE_PERIMETER_DEFAULT["center_lng"] - 0.001, "desc": "West Entrance"},
+                    }
+                    
+                    selected_gate = st.selectbox(
+                        "Select gate/entrance",
+                        list(gate_locations.keys()),
+                        key="security_gate_selection"
+                    )
+                    
+                    gate_info = gate_locations[selected_gate]
+                    location = gate_info["desc"]
+                    latitude = gate_info["lat"]
+                    longitude = gate_info["lng"]
+                    
+                    st.success(f"✅ Location set to: {selected_gate}")
+                    st.caption(f"Coordinates: {latitude:.6f}, {longitude:.6f}")
+                
+                else:
+                    location = st.text_input("Location description", key="security_location")
+                    latitude = st.number_input("Latitude", value=0.0, format="%.6f", key="security_lat")
+                    longitude = st.number_input("Longitude", value=0.0, format="%.6f", key="security_lng")
+                
                 notes = st.text_area("Notes", key="security_notes")
                 if st.button("Record scan event"):
                     if not student_choice:
