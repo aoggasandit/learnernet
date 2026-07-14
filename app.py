@@ -2395,98 +2395,137 @@ def main():
                     key="location_mode"
                 )
                 
+                latitude = 0.0
+                longitude = 0.0
+                location = ""
+                
                 if location_mode == "Pre-configured gates":
-                    # Common gate locations - can be customized
+                    # Fetch actual safe zone configuration from admin settings
+                    safe_zone = get_safe_zone()
+                    center_lat = safe_zone.get("center_lat", SAFE_PERIMETER_DEFAULT["center_lat"])
+                    center_lng = safe_zone.get("center_lng", SAFE_PERIMETER_DEFAULT["center_lng"])
+                    
+                    # Common gate locations based on configured safe perimeter
                     gate_locations = {
-                        "Main Gate": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"], "lng": SAFE_PERIMETER_DEFAULT["center_lng"], "desc": "Main Gate"},
-                        "North Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"] + 0.001, "lng": SAFE_PERIMETER_DEFAULT["center_lng"], "desc": "North Entrance"},
-                        "South Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"] - 0.001, "lng": SAFE_PERIMETER_DEFAULT["center_lng"], "desc": "South Entrance"},
-                        "East Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"], "lng": SAFE_PERIMETER_DEFAULT["center_lng"] + 0.001, "desc": "East Entrance"},
-                        "West Entrance": {"lat": SAFE_PERIMETER_DEFAULT["center_lat"], "lng": SAFE_PERIMETER_DEFAULT["center_lng"] - 0.001, "desc": "West Entrance"},
+                        "Main Gate": {"lat": center_lat, "lng": center_lng, "desc": "Main Gate"},
+                        "North Entrance": {"lat": center_lat + 0.001, "lng": center_lng, "desc": "North Entrance"},
+                        "South Entrance": {"lat": center_lat - 0.001, "lng": center_lng, "desc": "South Entrance"},
+                        "East Entrance": {"lat": center_lat, "lng": center_lng + 0.001, "desc": "East Entrance"},
+                        "West Entrance": {"lat": center_lat, "lng": center_lng - 0.001, "desc": "West Entrance"},
                     }
                     
-                    selected_gate = st.selectbox(
-                        "Select gate/entrance",
-                        list(gate_locations.keys()),
-                        key="security_gate_selection"
-                    )
-                    
-                    gate_info = gate_locations[selected_gate]
-                    location = gate_info["desc"]
-                    latitude = gate_info["lat"]
-                    longitude = gate_info["lng"]
-                    
-                    st.success(f"✅ Location set to: {selected_gate}")
-                    st.caption(f"Coordinates: {latitude:.6f}, {longitude:.6f}")
+                    try:
+                        selected_gate = st.selectbox(
+                            "Select gate/entrance",
+                            list(gate_locations.keys()),
+                            key="security_gate_selection"
+                        )
+                        
+                        if selected_gate:
+                            gate_info = gate_locations[selected_gate]
+                            location = gate_info["desc"]
+                            latitude = gate_info["lat"]
+                            longitude = gate_info["lng"]
+                            
+                            st.success(f"✅ Location: {selected_gate}")
+                            st.caption(f"📍 Coordinates: {latitude:.6f}, {longitude:.6f}")
+                    except Exception as e:
+                        st.warning("Please select a gate location")
                 
                 else:
-                    location = st.text_input("Location description", key="security_location")
-                    latitude = st.number_input("Latitude", value=0.0, format="%.6f", key="security_lat")
-                    longitude = st.number_input("Longitude", value=0.0, format="%.6f", key="security_lng")
+                    try:
+                        location = st.text_input("Location description", key="security_location", placeholder="e.g., Main Gate, North Entrance")
+                        latitude = st.number_input("Latitude", value=0.0, format="%.6f", key="security_lat")
+                        longitude = st.number_input("Longitude", value=0.0, format="%.6f", key="security_lng")
+                    except Exception as e:
+                        st.error("Error with manual location entry")
                 
-                notes = st.text_area("Notes", key="security_notes")
+                notes = st.text_area("Notes", key="security_notes", placeholder="Optional notes about the scan")
                 if st.button("Record scan event"):
                     if not student_choice:
-                        st.error("Please select a student first.")
+                        st.error("❌ Please select a student first.")
+                    elif not location:
+                        st.error("❌ Please set a location first.")
                     else:
+                        try:
+                            student_user = fetch_user(student_choice)
+                            if student_user:
+                                record_scan_event(
+                                    current_user["id"],
+                                    student_user["id"],
+                                    event_type,
+                                    latitude,
+                                    longitude,
+                                    location,
+                                    notes,
+                                )
+                                if not is_inside_safe_zone(latitude, longitude):
+                                    record_geofence_event(student_user["id"], "Exited safe perimeter", latitude, longitude)
+                                    notify_parents_of_event(student_user["id"], event_type, latitude, longitude, location)
+                                
+                                # Show confirmation with event details
+                                st.success("✅ Scan event recorded and logged!")
+                                st.info(f"📋 Event: {event_type} | Student: {student_choice} | Location: {location}")
+                                st.balloons()  # Celebration animation
+                            else:
+                                st.error("❌ Student not found")
+                        except Exception as e:
+                            st.error(f"❌ Error recording scan: {str(e)}")
+
+                try:
+                    if student_choice:
                         student_user = fetch_user(student_choice)
                         if student_user:
-                            record_scan_event(
-                                current_user["id"],
-                                student_user["id"],
-                                event_type,
-                                latitude,
-                                longitude,
-                                location,
-                                notes,
-                            )
-                            if not is_inside_safe_zone(latitude, longitude):
-                                record_geofence_event(student_user["id"], "Exited safe perimeter", latitude, longitude)
-                                notify_parents_of_event(student_user["id"], event_type, latitude, longitude, location)
-                            
-                            # Show confirmation with event details
-                            st.success("✅ Scan event recorded and logged!")
-                            st.info(f"📋 Event: {event_type} | Student: {student_choice} | Location: {location}")
-                            st.balloons()  # Celebration animation
-
-                if student_choice:
-                    student_user = fetch_user(student_choice)
-                    qr_payload = f"student:{student_user['user_code']}"
-                    qr_image = generate_qr_image(qr_payload)
-                    st.markdown("#### Student QR code")
-                    st.image(qr_image, caption="Scan this QR code at the gate", width=250)
-                    st.code(qr_payload)
+                            qr_payload = f"student:{student_user['user_code']}"
+                            qr_image = generate_qr_image(qr_payload)
+                            st.markdown("#### Student QR code")
+                            st.image(qr_image, caption="Scan this QR code at the gate", width=250)
+                            st.code(qr_payload)
+                except Exception as e:
+                    st.warning("Unable to display QR code")
 
                 st.markdown("---")
                 st.subheader("Today's scan history")
-                today_scans = get_today_scan_events()
-                if not today_scans:
-                    st.info("No scans recorded today.")
-                else:
-                    st.dataframe(today_scans)
+                try:
+                    today_scans = get_today_scan_events()
+                    if not today_scans:
+                        st.info("No scans recorded today.")
+                    else:
+                        st.dataframe(today_scans)
+                except Exception as e:
+                    st.error("Error loading scan history")
 
             elif current_user["role"] == "Parent":
                 st.subheader("Your children")
-                children = get_students_for_parent(current_user["id"])
-                if not children:
-                    st.info("No linked children found. Contact an administrator to connect your account.")
-                else:
-                    for child in children:
-                        st.markdown(f"### {child['username']}")
-                        recent_scans = [scan for scan in get_all_scan_events() if scan["student_user_id"] == child["id"]]
-                        if not recent_scans:
-                            st.info("No scans available for this student yet.")
-                        else:
-                            st.dataframe(recent_scans[:5])
+                try:
+                    children = get_students_for_parent(current_user["id"])
+                    if not children:
+                        st.info("No linked children found. Contact an administrator to connect your account.")
+                    else:
+                        for child in children:
+                            st.markdown(f"### {child['username']}")
+                            try:
+                                recent_scans = [scan for scan in get_all_scan_events() if scan["student_user_id"] == child["id"]]
+                                if not recent_scans:
+                                    st.info("No scans available for this student yet.")
+                                else:
+                                    st.dataframe(recent_scans[:5])
+                            except Exception as e:
+                                st.warning("Unable to load scan data")
+                except Exception as e:
+                    st.error("Error loading your children")
 
             elif current_user["role"] == "Student":
                 st.subheader("Your status")
                 st.write("Your account is connected to the school safety network.")
                 st.write("If you scan in or out of campus, your parents and management will be notified.")
-                qr_payload = f"student:{current_user['user_code']}"
-                qr_image = generate_qr_image(qr_payload)
-                st.image(qr_image, caption="Your student QR code", width=250)
-                st.code(qr_payload)
+                try:
+                    qr_payload = f"student:{current_user['user_code']}"
+                    qr_image = generate_qr_image(qr_payload)
+                    st.image(qr_image, caption="Your student QR code", width=250)
+                    st.code(qr_payload)
+                except Exception as e:
+                    st.warning("Unable to display your QR code")
             else:
                 st.info("Security tracking is reserved for Redemption Gate staff, parents, students, and management.")
 
