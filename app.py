@@ -2355,32 +2355,64 @@ def main():
             if current_user["role"] in ["Staff/Security", "School Management", "Super Admin"]:
                 st.subheader("Scan student QR and log events")
                 student_candidates = [u for u in get_all_users_except_current(0) if fetch_user_by_id(u["id"])["role"] == "Student"]
-                student_choice = st.selectbox(
-                    "Select student",
-                    [s["username"] for s in student_candidates],
-                    key="security_student_choice",
+                
+                # Add search bar for student selection
+                student_search = st.text_input(
+                    "Search student by name",
+                    placeholder="Type student name...",
+                    key="student_search"
                 )
+                
+                # Filter students based on search input
+                filtered_students = [
+                    s for s in student_candidates 
+                    if student_search.lower() in s["username"].lower()
+                ]
+                
+                if not filtered_students and student_search:
+                    st.warning("No students found matching your search.")
+                    student_choice = None
+                elif filtered_students:
+                    student_choice = st.selectbox(
+                        "Select student",
+                        [s["username"] for s in filtered_students],
+                        key="security_student_choice",
+                    )
+                else:
+                    student_choice = st.selectbox(
+                        "Select student",
+                        [s["username"] for s in student_candidates],
+                        key="security_student_choice",
+                    )
+                
                 event_type = st.selectbox("Event type", ["Entry", "Exit", "Pickup"], key="security_event_type")
                 location = st.text_input("Location description", key="security_location")
                 latitude = st.number_input("Latitude", value=0.0, format="%.6f", key="security_lat")
                 longitude = st.number_input("Longitude", value=0.0, format="%.6f", key="security_lng")
                 notes = st.text_area("Notes", key="security_notes")
                 if st.button("Record scan event"):
-                    student_user = fetch_user(student_choice)
-                    if student_user:
-                        record_scan_event(
-                            current_user["id"],
-                            student_user["id"],
-                            event_type,
-                            latitude,
-                            longitude,
-                            location,
-                            notes,
-                        )
-                        if not is_inside_safe_zone(latitude, longitude):
-                            record_geofence_event(student_user["id"], "Exited safe perimeter", latitude, longitude)
-                            notify_parents_of_event(student_user["id"], event_type, latitude, longitude, location)
-                        st.success("Scan event recorded and logged.")
+                    if not student_choice:
+                        st.error("Please select a student first.")
+                    else:
+                        student_user = fetch_user(student_choice)
+                        if student_user:
+                            record_scan_event(
+                                current_user["id"],
+                                student_user["id"],
+                                event_type,
+                                latitude,
+                                longitude,
+                                location,
+                                notes,
+                            )
+                            if not is_inside_safe_zone(latitude, longitude):
+                                record_geofence_event(student_user["id"], "Exited safe perimeter", latitude, longitude)
+                                notify_parents_of_event(student_user["id"], event_type, latitude, longitude, location)
+                            
+                            # Show confirmation with event details
+                            st.success("✅ Scan event recorded and logged!")
+                            st.info(f"📋 Event: {event_type} | Student: {student_choice} | Location: {location}")
+                            st.balloons()  # Celebration animation
 
                 if student_choice:
                     student_user = fetch_user(student_choice)
