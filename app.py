@@ -2478,9 +2478,43 @@ def main():
                         if student_user:
                             qr_payload = f"student:{student_user['user_code']}"
                             qr_image = generate_qr_image(qr_payload)
-                            st.markdown("#### Student QR code")
-                            st.image(qr_image, caption="Scan this QR code at the gate", width=250)
-                            st.code(qr_payload)
+                            
+                            # Display QR code with instructions
+                            st.markdown("#### 📱 Student QR Code")
+                            
+                            # Tabs for different scanning methods
+                            tab1, tab2 = st.tabs(["QR Scanner Method", "Manual Entry Method"])
+                            
+                            with tab1:
+                                st.markdown("""
+                                **How to scan QR codes using a phone/scanner:**
+                                
+                                1. **Using Phone Camera:**
+                                   - Point your phone camera at the QR code below
+                                   - A notification should appear with the student code
+                                   - Copy or scan the code
+                                
+                                2. **Using QR Scanner App:**
+                                   - Open a QR scanner app (e.g., "QR Scanner", "QR Code Reader")
+                                   - Point at the QR code on screen
+                                   - App reads the student code automatically
+                                
+                                3. **Using Handheld Scanner:**
+                                   - Use your security gate's handheld scanner
+                                   - Point laser at the QR code
+                                   - Automatic student identification
+                                """)
+                                st.image(qr_image, caption="📷 Point your scanner here", width=300)
+                            
+                            with tab2:
+                                st.markdown("""
+                                **Manual entry method (backup option):**
+                                
+                                If scanner is not available, use the text code below to manually identify the student:
+                                """)
+                                st.code(qr_payload, language="text")
+                                st.caption("💡 Use this code if QR scanner is unavailable")
+                
                 except Exception as e:
                     st.warning("Unable to display QR code")
 
@@ -2522,8 +2556,22 @@ def main():
                 try:
                     qr_payload = f"student:{current_user['user_code']}"
                     qr_image = generate_qr_image(qr_payload)
-                    st.image(qr_image, caption="Your student QR code", width=250)
-                    st.code(qr_payload)
+                    
+                    st.markdown("#### 📱 Your Student QR Code")
+                    st.markdown("**Share this QR code with security staff or print it on your student ID badge.**")
+                    
+                    # Tabs for different usage
+                    tab1, tab2 = st.tabs(["Display QR", "View Code"])
+                    
+                    with tab1:
+                        st.markdown("📷 Security staff will scan this code at gates to log your entry/exit/pickup")
+                        st.image(qr_image, caption="Your unique student QR code", width=300)
+                    
+                    with tab2:
+                        st.markdown("**Your unique student code (for reference or manual entry):**")
+                        st.code(qr_payload, language="text")
+                        st.caption("This code is scanned automatically - you don't need to enter it manually")
+                        
                 except Exception as e:
                     st.warning("Unable to display your QR code")
             else:
